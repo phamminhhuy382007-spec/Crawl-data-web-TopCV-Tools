@@ -1,0 +1,170 @@
+===============================================================
+        HƯỚNG DẪN SỬ DỤNG CÔNG CỤ CÀO DỮ LIỆU TUYỂN DỤNG TOPCV
+===============================================================
+
+Công cụ này tự động vào trang TopCV, tìm các tin tuyển dụng theo
+ngành nghề hoặc tên công việc bạn chọn, đọc từng tin và lưu lại
+thành file Excel (CSV), file JSON và (nếu muốn) vào database
+PostgreSQL. Chỉ những tin đăng trong vòng 12 tháng gần nhất được giữ lại.
+Số lượng --target-max là số tin SAU KHI ĐÃ LỌC TRÙNG (trùng mã tin, hoặc
+trùng tiêu đề + công ty + địa điểm do nhà tuyển dụng đăng lại).
+
+
+---------------------------------------------------------------
+BƯỚC 0. CHUẨN BỊ (CHỈ LÀM MỘT LẦN)
+---------------------------------------------------------------
+
+1. Mở thư mục dự án bằng VS Code.
+2. Mở Terminal: menu "Terminal" -> "New Terminal".
+3. Nếu chưa có thư mục .venv, cài đặt bằng 2 lệnh sau:
+
+   python -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+   (Máy đã cài sẵn rồi thì bỏ qua bước này.)
+
+4. Nếu muốn lưu vào PostgreSQL: mở pgAdmin, tạo một database trống
+   (chuột phải "Databases" -> "Create" -> "Database...", đặt tên, ví dụ
+   job_analytic_db). KHÔNG cần tạo bảng, công cụ tự tạo bảng job_postings.
+
+
+---------------------------------------------------------------
+BƯỚC 1. KHAI BÁO DATABASE (MỖI LẦN MỞ TERMINAL MỚI)
+---------------------------------------------------------------
+
+Gõ lệnh sau vào terminal, thay thông tin cho đúng với máy bạn:
+
+   $env:DATABASE_URL = "host=localhost port=5432 dbname=job_analytic_db user=postgres password=MAT_KHAU"
+
+Giải thích:
+   host      : địa chỉ máy chứa database (máy mình thì để localhost)
+   port      : cổng, mặc định 5432
+   dbname    : tên database đã tạo ở Bước 0
+   user      : tên đăng nhập PostgreSQL
+   password  : mật khẩu PostgreSQL
+
+Lưu ý:
+   - Dòng này chỉ có tác dụng trong cửa sổ terminal hiện tại.
+     Đóng terminal mở lại thì phải gõ lại.
+   - Không muốn dùng database? Bỏ qua bước này, công cụ sẽ chỉ xuất file.
+   - Không dán mật khẩu vào file code, không chụp màn hình có mật khẩu.
+
+
+---------------------------------------------------------------
+BƯỚC 2. CHẠY THỬ VỚI ÍT DỮ LIỆU
+---------------------------------------------------------------
+
+   .\.venv\Scripts\python.exe main.py --categories QA --target-max 10 --target-min 1 --max-pages 1 --output output_thu
+
+Nếu thấy dòng "Đã kết nối PostgreSQL, bảng 'job_postings'." là kết nối
+database thành công. Kết thúc sẽ có dòng "Hoàn tất: ... bản ghi hợp lệ".
+
+
+---------------------------------------------------------------
+BƯỚC 3. CHỌN CÁCH CÀO
+---------------------------------------------------------------
+
+CÁCH A - Cào toàn bộ 12 danh mục có sẵn (3.000 - 5.000 tin):
+
+   .\.venv\Scripts\python.exe main.py
+
+CÁCH B - Chỉ cào một vài danh mục có sẵn:
+
+   .\.venv\Scripts\python.exe main.py --categories Marketing HR "Data/AI"
+
+   Tên danh mục có sẵn (gõ đúng chữ hoa/thường):
+     Business : Marketing, Finance/Accounting, HR, Sales,
+                "Business Analysis", Operations
+     IT       : "Software Development", Data/AI, QA, DevOps/Cloud,
+                Cybersecurity, "IT Support"
+   Tên nào có dấu cách thì đặt trong ngoặc kép.
+
+CÁCH C - Cào theo tên công việc bất kỳ (gõ tiếng Việt có dấu được):
+
+   .\.venv\Scripts\python.exe main.py --keywords "kế toán tổng hợp" "java developer" --target-max 200 --target-min 1 --output output_ketoan_java
+
+   Mỗi tên công việc đặt trong ngoặc kép. Số lượng --target-max được
+   chia đều cho các công việc.
+
+Lưu ý: không dùng --categories và --keywords trong cùng một lệnh.
+
+
+CHẠY ĐẦY ĐỦ 3.000 - 5.000 TIN (ĐÃ LỌC TRÙNG):
+
+   .\.venv\Scripts\python.exe main.py --target-min 3000 --target-max 5000 --output output_full
+
+   - Thời gian: vài giờ. Có thể ngắt (Ctrl+C) và chạy lại đúng lệnh này
+     để làm tiếp.
+   - Nếu một ngành ít tin (vd. Cybersecurity) không đủ phần của mình, công
+     cụ tự chuyển phần thiếu sang các ngành còn nhiều tin (log hiện dòng
+     "Phân bổ lại: ...").
+   - Dòng cuối log "Thống kê loại bỏ" cho biết bao nhiêu tin bị bỏ vì
+     trùng (duplicate), quá cũ (too_old), thiếu dữ liệu (invalid)...
+   - Nếu kết thúc vẫn dưới 3.000: thêm từ khóa trong config.py (câu 8
+     bên dưới) hoặc tăng --max-pages, rồi chạy lại cùng --output.
+
+
+---------------------------------------------------------------
+BƯỚC 4. XEM KẾT QUẢ
+---------------------------------------------------------------
+
+1. File: trong thư mục output (hoặc thư mục bạn đặt bằng --output):
+     topcv_jobs.csv    -> mở bằng Excel
+     topcv_jobs.json   -> dùng cho lập trình / phân tích
+
+2. Database: mở pgAdmin -> Query Tool, chạy:
+
+     SELECT COUNT(*) FROM job_postings;
+     SELECT job_title_raw, company, salary, location, posting_date
+     FROM job_postings ORDER BY posting_date DESC LIMIT 50;
+
+
+---------------------------------------------------------------
+BẢNG CÁC TÙY CHỌN
+---------------------------------------------------------------
+
+   --categories A B ...   Chỉ cào các danh mục có sẵn được liệt kê
+   --keywords "x" "y"     Cào theo tên công việc tự nhập
+   --target-max 5000      Số tin tối đa cần lấy
+   --target-min 3000      Số tin tối thiểu (dưới mức này chỉ cảnh báo)
+   --max-pages 40         Số trang danh sách tối đa cho mỗi từ khóa
+   --lookback-days 365    Chỉ lấy tin đăng trong bao nhiêu ngày gần đây
+   --concurrency 3        Số trang tải cùng lúc (giảm nếu bị chặn)
+   --output output        Thư mục lưu file
+   --db-table job_postings  Tên bảng trong database
+   --no-db                Không ghi vào database, chỉ xuất file
+   -v                     In log chi tiết để tìm lỗi
+
+
+---------------------------------------------------------------
+CÂU HỎI THƯỜNG GẶP / XỬ LÝ LỖI
+---------------------------------------------------------------
+
+1. Báo: database "..." does not exist
+   -> Chưa tạo database hoặc gõ sai tên. Xem Bước 0 mục 4.
+
+2. Báo: password authentication failed
+   -> Sai user hoặc mật khẩu trong $env:DATABASE_URL.
+
+3. Báo: connection refused
+   -> PostgreSQL chưa chạy, hoặc sai host/port.
+
+4. Nhiều dòng "HTTP 429" hoặc "Thất bại sau ... lần thử"
+   -> TopCV đang giới hạn tốc độ. Công cụ tự chậm lại; nếu vẫn nhiều lỗi
+      hãy thêm --concurrency 1 vào lệnh.
+
+5. Chạy xong nhưng không cào thêm tin nào
+   -> Thư mục output đã có checkpoint đủ số lượng từ lần trước.
+      Hãy đổi sang thư mục mới bằng --output ten_thu_muc_moi.
+
+6. Đang chạy bị tắt máy / bấm Ctrl+C
+   -> Chạy lại đúng lệnh cũ (cùng --output). Công cụ tự chạy tiếp từ
+      chỗ đã dừng, không bị trùng dữ liệu.
+
+7. Cảnh báo "Chưa đạt mục tiêu tối thiểu 3000 bản ghi"
+   -> Không phải lỗi. Khi chạy thử ít dữ liệu hãy thêm --target-min 1.
+
+8. Muốn thêm từ khóa cố định cho một danh mục
+   -> Mở file config.py, thêm slug vào danh sách của danh mục đó.
+      Slug là phần sau "tim-viec-lam-" trên thanh địa chỉ khi tìm
+      việc trên TopCV (ví dụ: tim-viec-lam-ke-toan-thue -> ke-toan-thue).

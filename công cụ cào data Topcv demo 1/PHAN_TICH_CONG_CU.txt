@@ -1,0 +1,220 @@
+===============================================================
+     PHÂN TÍCH KỸ THUẬT: CÔNG CỤ CÀO DỮ LIỆU TUYỂN DỤNG TOPCV
+===============================================================
+
+
+1. MỤC TIÊU
+---------------------------------------------------------------
+Thu thập 3.000 - 5.000 tin tuyển dụng hợp lệ từ TopCV thuộc 12 danh mục
+(6 nhóm Business, 6 nhóm IT) hoặc theo tên công việc tự nhập, chỉ giữ tin
+đăng trong 12 tháng gần nhất, chuẩn hóa về một schema 19 trường thống nhất
+và lưu ra CSV, JSON, PostgreSQL.
+
+
+2. CÔNG NGHỆ SỬ DỤNG
+---------------------------------------------------------------
+   Python 3.10+      Ngôn ngữ chính.
+   asyncio           Chạy bất đồng bộ: tải nhiều trang song song trong
+                     một luồng, tiết kiệm thời gian chờ mạng.
+   httpx             HTTP client hỗ trợ async, timeout, chuyển hướng.
+   BeautifulSoup4    Phân tích cấu trúc HTML.
+   lxml              Bộ phân tích HTML tốc độ cao cho BeautifulSoup.
+   pandas            Tạo bảng dữ liệu và xuất CSV/JSON.
+   psycopg 3         Driver kết nối PostgreSQL.
+   argparse          Xử lý tham số dòng lệnh.
+   dataclasses       Định nghĩa mô hình dữ liệu rõ ràng, có kiểu.
+
+
+3. CẤU TRÚC THƯ MỤC
+---------------------------------------------------------------
+   main.py                    Điểm khởi chạy: đọc tham số, kết nối DB,
+                              khởi động pipeline.
+   config.py                  Danh mục, từ khóa, tham số vận hành mặc định.
+   requirements.txt           Danh sách thư viện.
+   scraper/
+     models.py                Mô hình dữ liệu JobPosting (19 trường) và
+                              ListingItem (dữ liệu sơ bộ từ trang danh sách).
+     http_client.py           Tải trang: giới hạn đồng thời, giãn cách,
+                              thử lại, tự giảm tốc khi bị chặn.
+     utils.py                 Hàm tiện ích: làm sạch văn bản, chuẩn hóa
+                              ngày, bỏ dấu tiếng Việt, chuẩn hóa hình thức.
+     sources/
+       base.py                Giao diện chung cho mọi nguồn dữ liệu.
+       topcv.py               Bộ phân tích riêng cho TopCV.
+     pipeline.py              Bộ điều phối toàn bộ quy trình.
+     storage.py               Lưu checkpoint và xuất CSV/JSON.
+     db.py                    Lưu vào PostgreSQL.
+
+Mỗi file chỉ đảm nhận một trách nhiệm. Muốn thêm nguồn mới (VietnamWorks,
+ITviec) chỉ cần viết thêm một file trong sources/ kế thừa BaseSource và
+đăng ký trong sources/__init__.py; pipeline, lưu trữ, DB giữ nguyên.
+
+
+4. LUỒNG XỬ LÝ TỔNG QUÁT (ANALYZE -> PLAN -> ACT -> OBSERVE)
+---------------------------------------------------------------
+Pipeline được tổ chức theo vòng lặp 4 pha:
+
+   [ANALYZE]  Đọc checkpoint cũ (nếu có) để biết đã thu được những tin
+              nào, thuộc danh mục nào. Nhờ vậy khi bị ngắt giữa chừng,
+              lần chạy sau tiếp tục thay vì làm lại từ đầu. Nếu có DB,
+              các bản ghi cũ được đồng bộ lại vào DB.
+
+   [PLAN]     Chia hạn mức đều: quota = target_max / số danh mục.
+              Ví dụ 5000 / 12 = 417 tin mỗi danh mục.
+              Phân bổ lại: sau mỗi vòng, danh mục nào đã CẠN TIN (duyệt hết
+              từ khóa mà chưa đủ quota) bị loại ra; phần còn thiếu được chia
+              thêm cho các danh mục còn tin. Lặp lại đến khi đủ target_max
+              hoặc mọi danh mục đều cạn. Mỗi từ khóa được nhớ vị trí trang
+              đang dừng để vòng sau đọc tiếp, không đọc lại từ đầu.
+
+   [ACT]      Với mỗi danh mục -> mỗi từ khóa -> mỗi trang kết quả:
+                1. Tải trang danh sách, lấy link các tin.
+                2. Loại tin đã thấy (chống trùng giữa các danh mục).
+                3. Tải song song các trang chi tiết.
+                4. Phân tích từng trang thành bản ghi JobPosting.
+
+   [OBSERVE]  Với mỗi bản ghi:
+                - Kiểm tra đủ trường bắt buộc (job_id, source, source_url,
+                  posting_date, retrieval_date, job_title_raw, company).
+                - Kiểm tra ngày đăng >= retrieval_date - 365 ngày.
+                - Kiểm tra trùng nội dung (xem mục 8).
+                - Kiểm tra quota danh mục / tổng.
+              Hợp lệ thì ghi ngay vào checkpoint và DB. Kết quả quan sát
+              quyết định vòng tiếp theo: nếu 3 trang liên tiếp không có
+              tin hợp lệ mới (hết tin, tin quá cũ, toàn tin trùng) thì
+              dừng từ khóa đó để không phí request.
+
+Sơ đồ:
+
+   main.py
+     |
+     v
+   ScrapePipeline.run()
+     |-- _analyze()  <-- storage.load_checkpoint()
+     |-- _plan()
+     |-- for task:
+     |     _act()  --> AsyncFetcher.get(trang danh sách)
+     |              --> TopCVSource.parse_listing()
+     |              --> AsyncFetcher.get(trang chi tiết) x N (song song)
+     |              --> TopCVSource.parse_detail()
+     |              --> _observe() --> storage.append_checkpoint()
+     |                              --> PostgresStorage.upsert()
+     |-- _finalize() --> storage.export() -> CSV + JSON
+
+
+5. CÁCH LẤY DỮ LIỆU TỪ TRANG TOPCV
+---------------------------------------------------------------
+5.1 Trang danh sách
+   URL dạng: https://www.topcv.vn/tim-viec-lam-<slug>?page=N&sort=new
+   Slug lấy từ config.py hoặc tự sinh từ --keywords bằng cách bỏ dấu
+   ("kế toán tổng hợp" -> "ke-toan-tong-hop").
+   Từ mỗi thẻ tin lấy link, tên, công ty. Link được chuẩn hóa (bỏ tham số
+   theo dõi ?ta_source=...) và trích mã số tin để tạo job_id = topcv_<số>.
+   Hỗ trợ cả 2 dạng link: /viec-lam/.../123.html và /brand/...-j123.html.
+   Nếu layout thẻ thay đổi, có cơ chế dự phòng quét mọi link khớp mẫu.
+
+5.2 Trang chi tiết - chiến lược 3 lớp
+   Lớp 1: JSON-LD (dữ liệu có cấu trúc schema.org/JobPosting mà TopCV
+          nhúng cho Google). Đây là nguồn ổn định nhất vì ít thay đổi
+          theo giao diện: ngày đăng, hạn nộp, loại hợp đồng, lương số,
+          kinh nghiệm (số tháng), ngành, địa chỉ, quyền lợi.
+   Lớp 2: CSS selector cho các khối "nhãn - giá trị" trên giao diện
+          (Mức lương, Địa điểm, Kinh nghiệm, Học vấn, Hình thức làm việc).
+          Hỗ trợ nhiều phiên bản giao diện của TopCV cùng lúc.
+   Lớp 3: Dò theo tiêu đề mục ("Mô tả công việc", "Yêu cầu ứng viên",
+          "Quyền lợi") và gom nội dung phía sau. Bỏ qua tiêu đề nằm trong
+          khối tag để tránh lấy nhầm.
+   Mỗi trường lấy giá trị đầu tiên tìm được theo thứ tự ưu tiên phù hợp:
+   ví dụ lương ưu tiên chuỗi hiển thị ("15 - 20 triệu") hơn số trong
+   JSON-LD; ngày đăng ưu tiên JSON-LD hơn "Cập nhật 2 ngày trước".
+
+5.3 Ánh xạ trường
+   job_id              topcv_ + mã số trong URL
+   source              "TopCV"
+   source_url          URL canonical của tin
+   archive_source      null (dự phòng cho link lưu trữ)
+   posting_date        JSON-LD datePosted -> thời gian tương đối ở danh sách
+   deadline            JSON-LD validThrough -> dòng "Hạn nộp hồ sơ"
+   retrieval_date      thời điểm tải trang chi tiết
+   job_title_raw       thẻ h1 -> JSON-LD title
+   company             khối tên công ty -> JSON-LD hiringOrganization
+   location            "Địa điểm" -> JSON-LD jobLocation
+   salary              "Mức lương" -> JSON-LD baseSalary (đổi ra triệu)
+   experience_required "Kinh nghiệm" -> JSON-LD monthsOfExperience
+   education_required  "Học vấn" -> JSON-LD educationRequirements
+   employment_type     JSON-LD employmentType + "Hình thức làm việc",
+                       chuẩn hóa: Full-time, Part-time, Contract,
+                       Internship, Remote, Hybrid, Onsite
+   job_description     mục "Mô tả công việc"
+   job_requirements    mục "Yêu cầu ứng viên"
+   job_benefits        mục "Quyền lợi"
+   category_raw        "Danh mục nghề liên quan" -> occupationalCategory
+                       -> tên danh mục/từ khóa đang tìm
+   industry_raw        JSON-LD industry -> "Lĩnh vực"
+
+
+6. CHỐNG BỊ CHẶN VÀ ĐỘ TIN CẬY
+---------------------------------------------------------------
+   - Semaphore giới hạn số request đồng thời (mặc định 3).
+   - Mỗi request chờ ngẫu nhiên 1 - 2,5 giây, đổi User-Agent ngẫu nhiên.
+   - Gặp lỗi tạm thời (403, 429, 5xx, lỗi mạng): thử lại tối đa 6 lần,
+     thời gian chờ tăng theo cấp số nhân, tôn trọng header Retry-After.
+   - Tự điều tiết khi gặp 429: toàn bộ request cùng tạm dừng và tăng
+     thêm độ giãn cách (tối đa +8 giây); khi tải thành công thì giảm dần.
+   - Lỗi 404 hoặc lỗi không thể thử lại: bỏ qua tin đó, không dừng chương
+     trình. Lỗi phân tích một tin cũng chỉ ghi log và bỏ qua.
+
+
+7. LƯU TRỮ
+---------------------------------------------------------------
+7.1 Checkpoint (topcv_jobs.checkpoint.jsonl)
+   Mỗi tin hợp lệ ghi ngay 1 dòng JSON (kèm danh mục tìm kiếm). Ghi từng
+   dòng nên mất điện chỉ mất tối đa tin đang xử lý. Đây là cơ sở cho
+   tính năng chạy tiếp.
+   File đi kèm topcv_jobs.rejected.txt lưu job_id của các tin đã bị loại
+   (trùng, quá cũ, thiếu dữ liệu) để lần chạy tiếp không tải lại chúng.
+
+7.2 CSV / JSON
+   Xuất khi kết thúc, đúng thứ tự 19 trường. CSV mã hóa utf-8-sig để
+   Excel hiển thị đúng tiếng Việt.
+
+7.3 PostgreSQL (bảng job_postings)
+   - Tự tạo bảng nếu chưa có; job_id là khóa chính; posting_date và
+     deadline kiểu DATE, retrieval_date kiểu TIMESTAMP, còn lại TEXT.
+   - Index trên posting_date và source để truy vấn nhanh.
+   - Ghi bằng INSERT ... ON CONFLICT (job_id) DO UPDATE (upsert): chạy
+     lại nhiều lần không sinh trùng, tin cũ được cập nhật nội dung mới.
+   - Tên bảng/cột được ghép qua psycopg.sql.Identifier và giá trị truyền
+     bằng tham số, chống SQL injection.
+   - Thông tin đăng nhập đọc từ biến môi trường DATABASE_URL, không lưu
+     trong mã nguồn.
+
+
+8. KIỂM ĐỊNH DỮ LIỆU
+---------------------------------------------------------------
+   - Chống trùng 2 lớp (mọi con số 3.000 - 5.000 đều là SAU khi lọc trùng):
+       Lớp 1 - theo job_id: một tin xuất hiện ở nhiều từ khóa/danh mục
+                chỉ được tải và tính một lần.
+       Lớp 2 - theo nội dung: cùng tiêu đề + công ty + địa điểm (đã bỏ
+                dấu, bỏ ký tự đặc biệt, không phân biệt hoa thường) được
+                coi là một tin đăng lại với mã mới; chỉ giữ bản đầu tiên.
+                Cùng vị trí ở 2 thành phố khác nhau vẫn là 2 bản ghi.
+     Tin bị loại do trùng nội dung được đếm vào "duplicate" và không
+     tính vào quota, nên công cụ sẽ cào thêm cho đủ số lượng.
+   - Bắt buộc có đủ 7 trường cốt lõi, thiếu thì loại (đếm "invalid").
+   - Lọc thời gian động: posting_date >= retrieval_date - lookback_days.
+   - Cuối lần chạy in thống kê: số tin mỗi danh mục, số tin bị loại theo
+     lý do (fetch_failed, parse_failed, invalid, too_old, duplicate, db_failed) và
+     cảnh báo nếu chưa đạt target_min.
+
+
+9. GIỚI HẠN CẦN BIẾT
+---------------------------------------------------------------
+   - Phụ thuộc cấu trúc HTML của TopCV; nếu TopCV đổi giao diện, cần cập
+     nhật selector trong scraper/sources/topcv.py (JSON-LD giúp giảm rủi ro).
+   - posting_date khi thiếu JSON-LD được ước lượng từ "Cập nhật X trước"
+     nên có thể lệch vài ngày.
+   - Tốc độ bị giới hạn bởi TopCV: 5.000 tin cần khoảng vài giờ ở mức an
+     toàn. Không nên tăng --concurrency quá cao.
+   - Khi dùng, cần tuân thủ điều khoản sử dụng của TopCV và quy định về
+     dữ liệu cá nhân; chỉ dùng dữ liệu cho mục đích nghiên cứu/phân tích.
